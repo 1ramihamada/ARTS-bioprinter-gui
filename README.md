@@ -33,12 +33,14 @@ The **ARTS BioPrinter Controller** is a Python-based application that provides a
   py -m pip install --upgrade pip
   py -m pip install wxPython pyserial matplotlib pillow
   ```
-3. Ensure your printer and dispenser are connected via USB.
+3. Place **assets** and **printer_profile** in same directory as GUI_Ubuntu.py
+   
+5. Ensure printer and dispenser are connected via USB.
 
 ## Usage
 Run the application with:
 ```sh
-python bioprinter_controller.py
+python GUI_Ubuntu.py
 ```
 
 ### Key Functionalities
