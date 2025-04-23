@@ -1,7 +1,7 @@
 # ARTS BioPrinter Controller
 
 ## Overview
-The **ARTS BioPrinter Controller** is a Python-based application that provides a GUI interface for controlling a bioprinter. The software facilitates communication with 3D printers and fluid dispensers via serial ports, allowing users to move axes, send G-code commands, and execute precise dispensing operations.
+The **ARTS BioPrinter Controller** is a Python-based application that provides a GUI interface for controlling a bioprinter. The software facilitates communication with a Prusa 3D printer and Nordson fluid dispenser via serial ports, allowing users to move axes, send G-code commands, and execute precise dispensing operations.
 
 ## Features
 - **Graphical Interface**: Built using `wxPython` for interactive control.
@@ -14,11 +14,8 @@ The **ARTS BioPrinter Controller** is a Python-based application that provides a
 
 ## Requirements
 - Python 3.x
-- Dependencies:
-  ```sh
-  pip install wxPython pyserial matplotlib pillow
-  ```
-- Compatible 3D printer and fluid dispenser
+- Nordson Ultimus V
+- Prusa i3 MK3S+
 
 ## Installation
 1. Clone the repository:
@@ -27,9 +24,15 @@ The **ARTS BioPrinter Controller** is a Python-based application that provides a
    cd bioprinter-controller
    ```
 2. Install dependencies:
-   ```sh
-   pip install -r requirements.txt
-   ```
+  # Ubuntu:
+  ```sh
+  pip install wxPython pyserial matplotlib pillow
+  ```
+  # Windows:
+  ```sh
+  py -m pip install --upgrade pip
+  py -m pip install wxPython pyserial matplotlib pillow
+  ```
 3. Ensure your printer and dispenser are connected via USB.
 
 ## Usage
