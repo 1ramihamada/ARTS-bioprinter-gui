@@ -40,7 +40,7 @@ F_coords = []
 # --- Dispenser Controller Code (unchanged) ---
 class DispenserController:
     def __init__(self):
-        logging.basicConfig(level=logging.DEBUG)
+        logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger('DispenserController')
         self.ser = None
         self.connect()
@@ -322,8 +322,8 @@ class BioPrinterMainFrame(wx.Frame):
         # Some parameters
         self.pressure = 2.0
         self.vacuum = 2.0
-        self.initial_delay = 5.0
-        self.travel_delay = 0.02
+        self.initial_delay = 1.0
+        self.travel_delay = 0.05
         self.dispense_delay = 0.05
 
         # MULTI-LAYER PLOT SETTINGS
@@ -389,7 +389,7 @@ class BioPrinterMainFrame(wx.Frame):
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(main_sizer)
 
-        # -- TOP ROW with serial port controls & load file --
+        # -- TOP ROW --
         top_panel = wx.Panel(self)
         top_sizer = wx.BoxSizer(wx.HORIZONTAL)
         top_panel.SetSizer(top_sizer)
@@ -425,15 +425,11 @@ class BioPrinterMainFrame(wx.Frame):
         btn_connect.Bind(wx.EVT_BUTTON, self.on_printer_connect)
         top_sizer.Add(btn_connect, 0, wx.RIGHT, 5)
 
-        btn_load_txt = wx.Button(top_panel, label="Load File")
-        btn_load_txt.Bind(wx.EVT_BUTTON, self.on_load_txt_file)
-        top_sizer.Add(btn_load_txt, 0, wx.RIGHT, 5)
+        btn_remote_connect = wx.Button(top_panel, label="Remote Connect")
+        btn_remote_connect.Bind(wx.EVT_BUTTON, self.on_remote_connect)
+        top_sizer.Add(btn_remote_connect, 0, wx.RIGHT, 5)
 
-        btn_start_print = wx.Button(top_panel, label="Start Print")
-        btn_start_print.Bind(wx.EVT_BUTTON, self.on_start_print)
-        top_sizer.Add(btn_start_print, 0, wx.RIGHT, 5)
-
-        # -- LAYER CONTROL --
+        # -- BOTTOM ROW --
         layer_panel = wx.Panel(self)
         layer_sizer = wx.BoxSizer(wx.HORIZONTAL)
         layer_panel.SetSizer(layer_sizer)
@@ -447,9 +443,21 @@ class BioPrinterMainFrame(wx.Frame):
         btn_set_layers.Bind(wx.EVT_BUTTON, self.on_set_layers)
         layer_sizer.Add(btn_set_layers, 0, wx.RIGHT, 5)
 
-        btn_remote_connect = wx.Button(top_panel, label="Remote Connect")
-        btn_remote_connect.Bind(wx.EVT_BUTTON, self.on_remote_connect)
-        top_sizer.Add(btn_remote_connect, 0, wx.RIGHT, 5)
+        btn_set_temp = wx.Button(layer_panel, label="Set Temp")
+        btn_set_temp.Bind(wx.EVT_BUTTON, self.on_set_temp)
+        layer_sizer.Add(btn_set_temp, 0, wx.RIGHT, 5)
+
+        btn_read_temp = wx.Button(layer_panel, label="Read Temp")
+        btn_read_temp.Bind(wx.EVT_BUTTON, self.on_read_temp)
+        layer_sizer.Add(btn_read_temp, 0, wx.RIGHT, 5)
+
+        btn_load_txt = wx.Button(layer_panel, label="Load File")
+        btn_load_txt.Bind(wx.EVT_BUTTON, self.on_load_txt_file)
+        layer_sizer.Add(btn_load_txt, 0, wx.RIGHT, 5)
+
+        btn_start_print = wx.Button(layer_panel, label="Start Print")
+        btn_start_print.Bind(wx.EVT_BUTTON, self.on_start_print)
+        layer_sizer.Add(btn_start_print, 0, wx.RIGHT, 5)
 
         # -- Middle row: arrow panel + console + 3D plot
         row2_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -489,6 +497,38 @@ class BioPrinterMainFrame(wx.Frame):
     def log(self, msg):
         wx.CallAfter(self.txt_console.AppendText, msg + "\n")
 
+    def on_set_temp(self, event):
+        dlg = wx.TextEntryDialog(self, "Enter extruder temperature (°C):", "Set Extruder Temp", "70")
+        if dlg.ShowModal() == wx.ID_OK:
+            try:
+                temp = float(dlg.GetValue().strip())
+                self.send_gcode(f"M104 S{int(temp)}")
+                self.log(f"Set extruder temperature to {temp:.1f} °C")
+            except ValueError:
+                self.log("Invalid temperature entered.")
+        dlg.Destroy()
+
+    def on_read_temp(self, event):
+        self.send_gcode("M105")
+        if self.printer_serial and self.printer_serial.is_open:
+            try:
+                response = self.printer_serial.readline().decode("utf-8").strip()
+                self.log(f"[PRINTER TEMP RAW] {response}")
+                if "T:" in response:
+                    parts = response.split()
+                    for part in parts:
+                        if part.startswith("T:"):
+                            temp_vals = part[2:].split("/")
+                            current_c = float(temp_vals[0])
+                            target_c = float(temp_vals[1])
+                            current_f = (current_c * 9/5) + 32
+                            target_f = (target_c * 9/5) + 32
+                            self.log(f"Hotend Temp: {current_c:.1f}°C / {target_c:.1f}°C")
+                            self.log(f"              {current_f:.1f}°F / {target_f:.1f}°F")
+                            return
+            except Exception as e:
+                self.log(f"Failed to read temperature: {e}")
+
     def send_gcode(self, cmd):
         # If a remote connection is established, use it.
         if self.remote_socket:
@@ -508,6 +548,14 @@ class BioPrinterMainFrame(wx.Frame):
             self.printer_serial.write(line)
             self.printer_serial.flush()
             self.log(f"[GCODE -> PRINTER] {cmd}")
+
+            # ✅ Read until we get "ok"
+            while True:
+                response = self.printer_serial.readline().decode('utf-8').strip()
+                if response:
+                    self.log(f"[PRINTER RESPONSE] {response}")
+                    if "ok" in response.lower():
+                        break
         # Otherwise, log an error (or choose not to do anything).
         else:
             self.log(f"[ERROR] No connection available for G-code: {cmd}")
@@ -585,6 +633,53 @@ class BioPrinterMainFrame(wx.Frame):
         t.daemon = True
         t.start()
 
+    def is_corner(self, i, angle_threshold_degrees=45):
+        """
+        Returns True if the angle between segments (i-1 to i) and (i to i+1)
+        is sharper than the given threshold (default = 45 degrees).
+        """
+        if i <= 0 or i >= len(x_coords) - 1:
+            return False
+
+        # Get vectors
+        vx1 = x_coords[i] - x_coords[i - 1]
+        vy1 = y_coords[i] - y_coords[i - 1]
+        vx2 = x_coords[i + 1] - x_coords[i]
+        vy2 = y_coords[i + 1] - y_coords[i]
+
+        # Skip degenerate zero-length vectors
+        if vx1 == 0 and vy1 == 0 or vx2 == 0 and vy2 == 0:
+            return False
+
+        # Compute angle between vectors
+        dot = vx1 * vx2 + vy1 * vy2
+        mag1 = (vx1**2 + vy1**2) ** 0.5
+        mag2 = (vx2**2 + vy2**2) ** 0.5
+        cos_theta = dot / (mag1 * mag2)
+
+        # Clamp to avoid math domain errors from floating-point errors
+        cos_theta = max(-1.0, min(1.0, cos_theta))
+
+        angle_rad = math.acos(cos_theta)
+        angle_deg = math.degrees(angle_rad)
+
+        return angle_deg < angle_threshold_degrees  # Sharp if less than threshold
+
+    @staticmethod
+    def calculate_travel_parameters(current_point, next_point, desired_feedrate):
+        # Calculate Euclidean distance
+        dx = next_point[0] - current_point[0]
+        dy = next_point[1] - current_point[1]
+        dz = next_point[2] - current_point[2]
+        distance = math.sqrt(dx**2 + dy**2 + dz**2)
+        
+        # Calculate time required for the move: time (sec) = (60 * distance) / feedrate
+        delay = (60 * distance) / desired_feedrate
+        min_delay = 0.05  # enforce at least 50 ms delay for very short moves
+        if delay < min_delay:
+            delay = min_delay
+        return delay
+
     def run_printing(self):
         self.log("Applying initial delay and moving to start...")
         if not x_coords:
@@ -592,53 +687,61 @@ class BioPrinterMainFrame(wx.Frame):
             self.is_printing = False
             return
 
-        # Move to first coordinate
+        self.send_gcode("G90")              # Absolute positioning
+        self.send_gcode("G92 X0 Y0 Z0")     # Set current as origin
+
         self.send_gcode(f"G1 X{x_coords[0]} Y{y_coords[0]} Z{z_coords[0]} F{F_coords[0]}")
-        time.sleep(self.initial_delay) # Allow setup time
+        time.sleep(self.initial_delay)
 
-        self.log("Starting multi-layer print...")
+        self.log("Starting print...")
+        self.dispensing = False
 
-        for i in range(len(x_coords)): # This will iterate through every coordinate in the file
+        for i in range(len(x_coords)):
             if self.stop_flag:
                 self.log("Printing Stopped by user/emergency stop.")
                 self.is_printing = False
                 return
             
-            # Define travel path range (based on the line numbers in the original file)
-            #travel_start = 1663
-            #travel_end = 1748
+            # Start dispenser once at first move
+            if i == 0 and not self.dispensing:
+                self.dispenser.dispenser_callback('start')
+                self.dispensing = True
 
-            #if not (travel_start <= i <= travel_end):
-            #    if i == 0:  # Fix condition to activate at start and end
-            #        self.dispenser.dispenser_callback('start')
-            
-            # Move to coordinate
+            # stop dispensing if Z = 0.700
+            if abs(z_coords[i] - 0.700) < 0.001:
+                if self.dispensing:
+                    # Stop dispensing when at travel height (z = 0.700)
+                    self.dispenser.dispenser_callback('stop')
+                    self.dispensing = False
+
+            else:
+                if not self.dispensing:
+                    self.dispenser.dispenser_callback('start')
+                    self.dispensing = True
+
             self.send_gcode(f"G1 X{x_coords[i]} Y{y_coords[i]} Z{z_coords[i]} F{F_coords[i]}")
-            time.sleep(self.travel_delay)  # Use self.travel_delay (set this to ~0.05s or more)
 
-            # Move to coordinate (with layer offset)
-            # self.send_gcode(f"G1 X{x_coords[i]} Y{y_coords[i]} Z{z_coords[i] + j*self.layer_height} F{F_coords[i]}")
+            # Calculate an adaptive delay for this move if a next point exists
+            if i < len(x_coords) - 1:
+                current_point = (x_coords[i], y_coords[i], z_coords[i])
+                next_point = (x_coords[i+1], y_coords[i+1], z_coords[i+1])
+                adaptive_delay = self.calculate_travel_parameters(current_point, next_point, F_coords[i])
+            else:
+                adaptive_delay = self.travel_delay  # use default for last point
 
-            # Embedded Dispense logic
-            # time.sleep(self.dispense_delay)
-            # self.dispenser.dispenser_callback('start')
-            # time.sleep(self.dispense_delay)
-            # self.dispenser.dispenser_callback('start')
-            # Travel delay
-            # time.sleep(self.travel_delay)
-
-        # After finishing a layer, update the color for that layer
-        # wx.CallAfter(self.update_layer_color, i)
-
-        # Wrap-up
+            if self.is_corner(i):
+                self.log(f"Corner detected at index {i}. Using no delay.")
+                continue
+            else:
+                self.log("Apaptive")
+                time.sleep(adaptive_delay)
+        
         self.dispenser.dispenser_callback('start')
         self.send_gcode("G90")
         if self.printer_serial:
             self.printer_serial.flush()
-            # self.printer_serial.close()  # only if you want to close the port
         self.log("Printing done.")
         self.is_printing = False
-
 
     # -------------------------------------------------------------------------
     # Movement, Homing, etc.
