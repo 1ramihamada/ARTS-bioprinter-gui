@@ -24,11 +24,11 @@ The **ARTS BioPrinter Controller** is a Python-based application that provides a
    cd bioprinter-controller
    ```
 2. Install dependencies:
-  # Ubuntu:
+  ### Ubuntu:
   ```sh
   pip install wxPython pyserial matplotlib pillow
   ```
-  # Windows:
+  ### Windows:
   ```sh
   py -m pip install --upgrade pip
   py -m pip install wxPython pyserial matplotlib pillow
