@@ -18,7 +18,7 @@ from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
 
 from PIL import Image
 
-ASSETS_PATH = "/home/rami/Downloads/assets"
+ASSETS_PATH = "/home/rami/Downloads/Prusa/assets"
 
 USEFUL_GCODE_COMMANDS = [
     "M114   (Get current position)",
@@ -29,6 +29,7 @@ USEFUL_GCODE_COMMANDS = [
     "G90    (Absolute positioning)",
     "G91    (Relative positioning)",
     "G1 X10 Y5 F3000 (Move X+10, Y+5 at feed=3000)",
+    "G92 X0 Y0 Z0 (Set the current position (0,0,0))"
 ]
 
 # We'll keep global x_coords, y_coords, z_coords, F_coords
@@ -37,17 +38,85 @@ y_coords = []
 z_coords = []
 F_coords = []
 
+def auto_find_nordson_ports(n=2, baud=115200, timeout=1.0):
+    ports = []
+    for p in serial.tools.list_ports.comports():
+        try:
+            s = serial.Serial(p.device, baud, timeout=timeout)
+            time.sleep(1)
+            s.write(b'\x05')          # ENQ
+            time.sleep(0.1)
+            if s.read(1) == b'\x06':  # ACK
+                ports.append(p.device)
+            s.close()
+        except:
+            pass
+        if len(ports) >= n:
+            break
+    return ports
+
+def run_both(f1, f2):
+    t1 = threading.Thread(target=f1)
+    t2 = threading.Thread(target=f2)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+class MultiDispenserController:
+    def __init__(self, mode='single', port=None):
+        self.mode = mode
+        if mode == 'single':
+            self.new = DispenserController(port) if port else DispenserController()
+            self.controllers = [self.new]
+        else:
+            ports = auto_find_nordson_ports(2)
+            if len(ports) < 2:
+                raise RuntimeError(f"Need 2 ports, found {ports}")
+            self.new = DispenserController(ports[0])
+            self.old = DispenserController(ports[1])
+            self.controllers = [self.new, self.old]
+
+    def _parallel(self, fn, *args):
+        t = threading.Thread(target=fn, args=args)
+        t.daemon = True
+        t.start()
+        return t
+
+    def dispenser_callback(self, cmd):
+        # launch one thread per controller, then wait for both
+        threads = [ self._parallel(d.dispenser_callback, cmd)
+                    for d in self.controllers ]
+        for t in threads: t.join()
+
+    def emergency_stop(self):
+        threads = [ self._parallel(d.emergency_stop)
+                    for d in self.controllers ]
+        for t in threads: t.join()
+
 # --- Dispenser Controller Code (unchanged) ---
 class DispenserController:
-    def __init__(self):
+    def __init__(self, port: str = None):
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger('DispenserController')
         self.ser = None
+        self.port = port
         self.connect()
         self.is_timed_mode = True
         self.logger.debug('Dispenser Controller Started')
 
     def connect(self):
+        # if a specific port was requested, try it first
+        if self.port:
+            try:
+                self.ser = serial.Serial(self.port, baudrate=115200, timeout=1)
+                self.logger.info(f'Connected to {self.port}')
+                time.sleep(2)
+                return
+            except Exception as e:
+                self.logger.error(f"Error opening {self.port}: {e}")
+                # fall back to scanning
+
         available_ports = list(serial.tools.list_ports.comports())
         if not available_ports:
             self.logger.error("No serial ports found. Running in simulation mode.")
@@ -81,12 +150,19 @@ class DispenserController:
     def send_command(self, command_code, data):
         if self.ser:
             try:
+
+                # clear out any stale data
+                self.ser.reset_input_buffer()
+                self.ser.reset_output_buffer()
+
+                # 1) send ENQ
                 self.ser.write(b'\x05')
                 time.sleep(0.1)
                 ack_response = self.ser.read(1)
                 if ack_response != b'\x06':
                     self.logger.warning("Did not receive ACK after ENQ.")
-                    return
+                    # return
+                    # ↑ do NOT return here; we’ll still send the packet
 
                 STX = b'\x02'
                 ETX = b'\x03'
@@ -228,6 +304,16 @@ class DispenserController:
             self.ser.close()
         self.logger.info('Dispenser Controller Stopped')
 
+    def set_pressure(self, bar: float):
+        if not (0.0 <= bar <= 650.0):
+            raise ValueError("Pressure out of range")
+        self.dispenser_callback(f"pressure {bar}")
+
+    def set_vacuum(self, h2o: float):
+        if not (0.0 <= h2o <= 300.0):
+            raise ValueError("Vacuum out of range")
+        self.dispenser_callback(f"vacuum {h2o}")
+
 # -----------------------------------------------------------------------
 # A separate top-level Frame that captures arrow keys to move the printer
 # -----------------------------------------------------------------------
@@ -313,7 +399,14 @@ class BioPrinterMainFrame(wx.Frame):
         self.Centre()
 
         self.remote_socket = None
-        self.dispenser = DispenserController()
+        # default mode
+        self.dispenser_mode = 'single'   # or load from settings
+        # if you want to let the user pick port+mode upfront, pop up a dialog here
+
+        self.dispenser = MultiDispenserController(
+            mode=self.dispenser_mode,
+            port=None   # or '/dev/ttyUSB1' if you want to pin it
+        )
         self.printer_serial = None
         self.is_paused = False
         self.is_printing = False
@@ -1150,27 +1243,73 @@ class SettingsDialog(wx.Dialog):
         dlg_sizer = wx.BoxSizer(wx.VERTICAL)
         panel.SetSizer(dlg_sizer)
 
-        # Pressure
+        # — Pressure row —
         pressure_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        lbl_pressure = wx.StaticText(panel, label="Pressure (BAR*0.01):")
-        pressure_sizer.Add(lbl_pressure, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        self.txt_pressure = wx.TextCtrl(panel, value=str(mainframe.pressure))
-        pressure_sizer.Add(self.txt_pressure, 1, wx.EXPAND)
-        btn_set_pressure = wx.Button(panel, label="Set Pressure")
-        btn_set_pressure.Bind(wx.EVT_BUTTON, self.on_set_pressure)
-        pressure_sizer.Add(btn_set_pressure, 0, wx.LEFT, 10)
-        dlg_sizer.Add(pressure_sizer, 0, wx.EXPAND | wx.ALL, 5)
+        lblP = wx.StaticText(panel, label="Pressure (BAR*0.01):")
+        pressure_sizer.Add(lblP, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 5)
 
-        # Vacuum
+        # single-mode field
+        self.txt_pressure = wx.TextCtrl(panel, value=str(mainframe.pressure))
+        pressure_sizer.Add(self.txt_pressure, 1, wx.EXPAND|wx.RIGHT, 10)
+
+        # dual-mode fields (start hidden)
+        self.lbl_pressure_new = wx.StaticText(panel, label="1:")
+        self.txt_pressure_new = wx.TextCtrl(panel, value=str(mainframe.pressure))
+        self.lbl_pressure_old = wx.StaticText(panel, label="2:")
+        self.txt_pressure_old = wx.TextCtrl(panel, value=str(mainframe.pressure))
+
+        for w in (self.lbl_pressure_new, self.txt_pressure_new,
+                self.lbl_pressure_old, self.txt_pressure_old):
+            pressure_sizer.Add(w, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 5)
+            w.Hide()   # initially hidden
+
+        self.btn_set_pressure = wx.Button(panel, label="Set Pressure")
+        self.btn_set_pressure.Bind(wx.EVT_BUTTON, self.on_set_pressure)
+        pressure_sizer.Add(self.btn_set_pressure, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        dlg_sizer.Add(pressure_sizer, 0, wx.EXPAND|wx.ALL, 5)
+
+        # — Vacuum row —
         vacuum_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        lbl_vacuum = wx.StaticText(panel, label="Vacuum (H20):")
-        vacuum_sizer.Add(lbl_vacuum, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        lblV = wx.StaticText(panel, label="Vacuum (H₂O):")
+        vacuum_sizer.Add(lblV, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 5)
+
         self.txt_vacuum = wx.TextCtrl(panel, value=str(mainframe.vacuum))
-        vacuum_sizer.Add(self.txt_vacuum, 1, wx.EXPAND)
-        btn_set_vacuum = wx.Button(panel, label="Set Vacuum")
-        btn_set_vacuum.Bind(wx.EVT_BUTTON, self.on_set_vacuum)
-        vacuum_sizer.Add(btn_set_vacuum, 0, wx.LEFT, 10)
-        dlg_sizer.Add(vacuum_sizer, 0, wx.EXPAND | wx.ALL, 5)
+        vacuum_sizer.Add(self.txt_vacuum, 1, wx.EXPAND|wx.RIGHT, 10)
+
+        self.lbl_vacuum_new = wx.StaticText(panel, label="1:")
+        self.txt_vacuum_new = wx.TextCtrl(panel, value=str(mainframe.vacuum))
+        self.lbl_vacuum_old = wx.StaticText(panel, label="2:")
+        self.txt_vacuum_old = wx.TextCtrl(panel, value=str(mainframe.vacuum))
+
+        for w in (self.lbl_vacuum_new, self.txt_vacuum_new,
+                self.lbl_vacuum_old, self.txt_vacuum_old):
+            vacuum_sizer.Add(w, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 5)
+            w.Hide()
+
+        self.btn_set_vacuum = wx.Button(panel, label="Set Vacuum")
+        self.btn_set_vacuum.Bind(wx.EVT_BUTTON, self.on_set_vacuum)
+        vacuum_sizer.Add(self.btn_set_vacuum, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        dlg_sizer.Add(vacuum_sizer, 0, wx.EXPAND|wx.ALL, 5)
+
+        # Single/ Dual Mode Dispenser
+        mode_choices = ["single", "dual"]
+        self.radio_mode = wx.RadioBox(
+            panel,
+            label="Dispenser Mode",
+            choices=[c.capitalize() for c in mode_choices],
+            majorDimension=1,
+            style=wx.RA_SPECIFY_ROWS
+        )
+        self.radio_mode.Bind(wx.EVT_RADIOBOX, self.on_mode_changed)
+        dlg_sizer.Add(self.radio_mode, 0, wx.ALL|wx.EXPAND, 5)
+
+        # pick the right button:
+        self.radio_mode.SetSelection(mode_choices.index(self.mainframe.dispenser_mode))
+
+        # force a first layout so the correct widgets show/hide immediately:
+        self.on_mode_changed(None)
 
         # Initial Delay
         init_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -1208,21 +1347,62 @@ class SettingsDialog(wx.Dialog):
         self.SetSizer(main_sizer)
         self.Layout()
 
+    def on_mode_changed(self, event):
+        mode = self.radio_mode.GetStringSelection().lower()
+        # if it actually changed:
+        if mode != self.mainframe.dispenser_mode:
+            self.mainframe.dispenser_mode = mode
+            self.mainframe.dispenser = MultiDispenserController(mode=mode)
+            self.mainframe.log(f"Switched to {mode.title()} mode.")
+        # now show/hide the widgets...
+        dual = (mode == 'dual')
+        self.txt_pressure.Show(not dual)
+        for w in (self.lbl_pressure_new,
+                self.txt_pressure_new,
+                self.lbl_pressure_old,
+                self.txt_pressure_old):
+            w.Show(dual)
+        self.txt_vacuum.Show(not dual)
+        for w in (self.lbl_vacuum_new,
+                self.txt_vacuum_new,
+                self.lbl_vacuum_old,
+                self.txt_vacuum_old):
+            w.Show(dual)
+        self.Layout()
+
     def on_set_pressure(self, event):
+        mode = self.radio_mode.GetStringSelection().lower()
         try:
-            val = float(self.txt_pressure.GetValue())
-            self.mainframe.pressure = val
-            self.mainframe.dispenser.dispenser_callback(f"pressure {val}")
-            self.mainframe.log(f"Pressure set to {val}")
+            if mode == 'dual':
+                p_new = float(self.txt_pressure_new.GetValue())
+                p_old = float(self.txt_pressure_old.GetValue())
+                run_both(
+                    lambda: self.mainframe.dispenser.new.set_pressure(p_new),
+                    lambda: self.mainframe.dispenser.old.set_pressure(p_old)
+                )
+                self.mainframe.log(f"NEW={p_new}, OLD={p_old}")
+            else:
+                p = float(self.txt_pressure.GetValue())
+                self.mainframe.dispenser.dispenser_callback(f"pressure {p}")
+                self.mainframe.log(f"Pressure set to {p}")
         except ValueError:
             self.mainframe.log("Invalid pressure value.")
 
     def on_set_vacuum(self, event):
+        mode = self.radio_mode.GetStringSelection().lower()
         try:
-            val = float(self.txt_vacuum.GetValue())
-            self.mainframe.vacuum = val
-            self.mainframe.dispenser.dispenser_callback(f"vacuum {val}")
-            self.mainframe.log(f"Vacuum set to {val}")
+            if mode == 'dual':
+                v_new = float(self.txt_vacuum_new.GetValue())
+                v_old = float(self.txt_vacuum_old.GetValue())
+                run_both(
+                    lambda: self.mainframe.dispenser.new.set_vacuum(v_new),
+                    lambda: self.mainframe.dispenser.old.set_vacuum(v_old)
+                )
+                self.mainframe.log(f"NEW={v_new}, OLD={v_old}")
+            else:
+                v = float(self.txt_vacuum.GetValue())
+                self.mainframe.dispenser.dispenser_callback(f"vacuum {v}")
+                self.mainframe.log(f"Vacuum set to {v}")
         except ValueError:
             self.mainframe.log("Invalid vacuum value.")
 
@@ -1238,9 +1418,17 @@ class SettingsDialog(wx.Dialog):
             self.mainframe.log(
                 f"Delays updated: initial={init_val}, travel={trav_val}, dispense={disp_val}"
             )
+
+            # --- Check if dispenser mode changed ---
+            selected_mode = self.radio_mode.GetStringSelection().lower()
+            if selected_mode != self.mainframe.dispenser_mode:
+                self.mainframe.dispenser_mode = selected_mode
+                self.mainframe.dispenser = MultiDispenserController(
+                    mode=selected_mode
+                )
+                self.mainframe.log(f"Switched to {selected_mode.title()} mode.")
         except ValueError:
             self.mainframe.log("Invalid delay value.")
-
 
 class BioPrinterApp(wx.App):
     def OnInit(self):
